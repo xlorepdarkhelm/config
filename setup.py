@@ -17,7 +17,7 @@ try:
     version = hgdistver.get_version()
     
 except AssertionError:
-    version = hgdistver.getversion(guess_next=False)
+    version = hgdistver.get_version(guess_next=False)
     
 setup(
     name='xdh_config',
