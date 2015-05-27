@@ -32,6 +32,7 @@ setup(
     author_email='xlorep@darkhelm.org',
     
     url='https://github.com/xlorepdarkhelm/config',
+    download_url = 'https://github.com/xlorepdarkhelm/config/archive/master.zip',
     
     license='MIT',
     
