@@ -4,7 +4,7 @@ Base module for making config objects
 
 import sys
 
-import _config
+from xdh import _config
 
 config = _config.MainConfig()
 config.__doc__ = __doc__

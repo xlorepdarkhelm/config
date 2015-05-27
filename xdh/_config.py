@@ -6,6 +6,19 @@ import sys
 NOT_LOADED = '<Not Loaded>'
 
 def parse_element(elem):
+    """
+    Recursive function that is designed to convert the given object into
+    something that can be used in a config object. For the most part this is
+    accomplished by converting sequences into immutable versions,
+    so :py:class:`set` becomes :py:class:`frozenset`, and :py:class:`list`
+    becomes :py:class:`tuple. However, dict becomes :py:class:`DictConfig`, as
+    there is no default read-only mapper. Literal values simply pass through.
+    
+    :param elem: The element/object to process
+    
+    :return: A read-only version of the element/object that was processed
+    """
+    
     isinstance = builtins.isinstance
     
     if isinstance(elem, type):
@@ -37,6 +50,15 @@ def parse_element(elem):
     return ret
 
 def unpack_element(elem):
+    """
+    Reverses the process from :py:func:`parse_element`. This converts a
+    read-only object into a read/write version of the same object.
+    
+    :param elem: The element/object to convert
+    
+    :return: The read/write version of the given element/object.
+    """
+    
     isinstance = builtins.isinstance
     
     if isinstance(elem, type):
@@ -68,6 +90,16 @@ def unpack_element(elem):
     return ret
 
 class BaseConfig(collections.Mapping):
+    """
+    The base class for all config objects. Every object registers attributes
+    to be used with it through the :py:meth:`register_attr` method. This class
+    uses lazy-evaluating & memoization techniques to ensure that the object only
+    loads the data which is used, when it is accessed.
+    
+    .. note:: Registered attributes can be accessed as object attributes and
+        as dict keys. This provides flexibility in the use of a config object.
+    """
+    
     @property
     def __dict__(self):
         try:
@@ -176,13 +208,18 @@ class BaseConfig(collections.Mapping):
             
     @property
     def bad_names(self):
+        """
+        The set of attribute names to exclude from the dir() function output.
+        """
+        
         try:
             return self.__data['bad_names']
             
         except KeyError:
             self.bad_names = {
                 'bad_names',
-                'register_attr'
+                '_unregister_attr',
+                '_replace_attr'
             } | {
                 ''.join(['__BaseConfig', attr])
                 for attr in {
@@ -206,6 +243,10 @@ class BaseConfig(collections.Mapping):
         return vars(self).get(key, default)
 
     def deepcopy(self):
+        """
+        Returns a read/write version of the config object.
+        """
+        
         return unpack_element(self)
         
     @property
@@ -250,6 +291,28 @@ class BaseConfig(collections.Mapping):
             pass
         
     def register_attr(self, name, func, doc=None, setable=False):
+        """
+        Registers a new attribute for the config object that can then be
+        accessed from the object, and lazily-computed when accessed.
+        
+        :param name: The name of the attribute. This should follow the
+            restrictions for variable names, as it can be accessed as an
+            attribute on the config object.
+        :type name: str
+        :param func: A function that returns the value for this attribute. This
+            function must need no additional parameters, unless the setable
+            parameter is True, then it must accept a single parameter.
+        :type func: callable
+        :param doc: The docstring for the attribute. If not included, a generic
+            docstring will be set.
+        :type doc: str
+        :param setable: If True, the attribute is not accessable until it has
+            been set, and it can only ever be set a single time. If accessed
+            before being set, or if a process attempts to set the attribute a
+            second time, this raises a :py:class:`AttributeError`
+        :type setable: bool
+        """
+        
         if doc is None:
             doc = ' '.join(['The', name, 'attribute.'])
             
@@ -288,6 +351,11 @@ class BaseConfig(collections.Mapping):
         self.__attr_set.add(name)
         
     def get_path(self, *path):
+        """
+        Convenience method to directly access a value at any level within the
+        tree.
+        """
+        
         ret = self
         for key in path:
             ret = ret[key]
@@ -295,6 +363,10 @@ class BaseConfig(collections.Mapping):
         return ret
         
 class DictConfig(BaseConfig):
+    """
+    Very simple config object that converts a dict into a config.
+    """
+    
     def __init__(self, source):
         for name, value in source.items():
             self.register_attr(
@@ -303,6 +375,11 @@ class DictConfig(BaseConfig):
             )
             
 class MainConfig(BaseConfig):
+    """
+    Class used by :py:mod:`xdh.config`, the module itself is replaced with an
+    instance of this class.
+    """
+    
     def __init__(self):
         super().__init__()
         
@@ -314,4 +391,10 @@ class MainConfig(BaseConfig):
             'to_config',
             lambda: parse_element,
             parse_element.__doc__
+        )
+        
+        self.register_attr(
+            'from_config',
+            lambda: unpack_element,
+            unpack_element.__doc__
         )
