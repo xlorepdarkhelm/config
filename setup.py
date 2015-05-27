@@ -20,7 +20,7 @@ except AssertionError:
     version = hgdistver.get_version(guess_next=False)
     
 setup(
-    name='xdh_config',
+    name='xdh-config',
     
     version=version.split('+')[0],
     
