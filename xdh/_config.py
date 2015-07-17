@@ -1,24 +1,35 @@
 import builtins
 import collections.abc
 import functools
+import itertools
 import sys
 
-NOT_LOADED = '<Not Loaded>'
+class NotLoaded:
+    def __new__(cls, *args, **kwargs):
+        try:
+            return cls.__instance
+
+        except AttributeError:
+            cls.__instance = super().__new__(cls, *args, **kwargs)
+            return cls.__instance
+
+    def __str__(self):
+        return 'Not Loaded'
+
+    def __repr__(self):
+        return '<NotLoaded>'
+
+    def __bool__(self):
+        return False
+
+    def __hash__(self):
+        return hash(type(self).__name__)
+
+
+NotLoaded = NotLoaded()
+
 
 def parse_element(elem):
-    """
-    Recursive function that is designed to convert the given object into
-    something that can be used in a config object. For the most part this is
-    accomplished by converting sequences into immutable versions,
-    so :py:class:`set` becomes :py:class:`frozenset`, and :py:class:`list`
-    becomes :py:class:`tuple. However, dict becomes :py:class:`DictConfig`, as
-    there is no default read-only mapper. Literal values simply pass through.
-    
-    :param elem: The element/object to process
-    
-    :return: A read-only version of the element/object that was processed
-    """
-    
     isinstance = builtins.isinstance
     
     if isinstance(elem, type):
@@ -50,23 +61,12 @@ def parse_element(elem):
     return ret
 
 def unpack_element(elem):
-    """
-    Reverses the process from :py:func:`parse_element`. This converts a
-    read-only object into a read/write version of the same object.
-    
-    :param elem: The element/object to convert
-    
-    :return: The read/write version of the given element/object.
-    """
-    
     isinstance = builtins.isinstance
     
     if isinstance(elem, type):
         ret = elem
         
-    elif isinstance(elem, BaseConfig):
-        ret = {key: unpack_element(getattr(elem, key)) for key in elem}
-        
+
     elif isinstance(elem, collections.abc.Mapping):
         ret = {key: unpack_element(value) for key, value in elem.items()}
         
@@ -90,86 +90,113 @@ def unpack_element(elem):
     return ret
 
 class BaseConfig(collections.Mapping):
-    """
-    The base class for all config objects. Every object registers attributes
-    to be used with it through the :py:meth:`register_attr` method. This class
-    uses lazy-evaluating & memoization techniques to ensure that the object only
-    loads the data which is used, when it is accessed.
+    def __gen_valid_keys(self):
+        yield from (
+            key
+            for key in (
+                set(self._attr_func.__slots__) | set(self._attr_data.__slots__)
+            )
+            if hasattr(self._attr_func, key) or hasattr(self._attr_data, key)
+        )
     
-    .. note:: Registered attributes can be accessed as object attributes and
-        as dict keys. This provides flexibility in the use of a config object.
-    """
-    
+    def __gen_unloaded_items(self):
+        yield from (
+            (key, getattr(self._attr_data, key, NotLoaded))
+            for key in self.__gen_valid_keys()
+        )
+
+    def __gen_loaded_items(self):
+        yield from (
+            (key, getattr(self, key))
+            for key in self.__gen_valid_keys()
+        )
+
     @property
     def __dict__(self):
+        "Return vars(self)."
+
+        entries = dict(self.__gen_unloaded_items())
+
         try:
-            ret = vars(super())
-            
+            return dict(vars(super()).items(), **entries)
+
         except TypeError:
-            ret = {}
-            
-        ret.update({
-            entry: (
-                self.__internal_dict[entry]
-                if entry in self.__internal_dict
-                else NOT_LOADED
-            )
-            for entry in self.__attr_set - self.bad_names
-        })
-        
-        return ret
+            return entries
         
     def __repr__(self):
+        "Return repr(self)."
+
         return repr(vars(self))
-        
+
     def __getitem__(self, key):
-        ret = vars(self)[key]
-        
-        if ret == NOT_LOADED:
-            ret = getattr(self, key)
-            
-        return ret
-        
+        "Return self[key]."
+
+        return getattr(self, key)
+
     def __contains__(self, key):
+        "Return key in self."
+
         return key in vars(self)
-        
+
     def __str__(self):
+        "Return str(self)."
+
         return str(vars(self))
-        
+
     def __sizeof__(self):
+        "Return sys.getsizeof(self)."
+
         return sys.getsizeof(vars(self))
-        
+
     def __len__(self):
+        "Return len(self)."
+
         return len(vars(self))
-        
+
     def __iter__(self):
+        "Return iter(self)."
+
         yield from vars(self)
-        
+
     def __eq__(self, other):
+        "Return self==other."
+
         return vars(self) == other
-        
+
     def __ne__(self, other):
+        "Return self!=other."
         return vars(self) != other
-        
+
     def keys(self):
-        yield from self
-        
+        """
+        Returns a DictKeys object providing a view of the config object's
+        keys.
+        """
+
+        return dict(self.__gen_unloaded_items()).keys()
+
     def values(self):
-        yield from (self.get(key, NOT_LOADED) for key in self)
+        """
+        Returns a DictValues object providing a view of the config object's
+        values.
+        """
+
+        return dict(self.__gen_loaded_items()).values()
 
     def items(self):
-        yield from (
-            (
-                key,
-                self.get(key, NOT_LOADED)
-            )
-            for key in self
-        )
-        
+        """
+        Returns a DictItems object providing a view of the config object's
+        items.
+        """
+
+        return dict(self.__gen_loaded_items()).items()
+
     def __dir__(self):
+        "Return dir(self)."
+
         my_vars = set(vars(self))
         skips = self.bad_names | my_vars
-        
+
         yield from (
             attr
             for attr in dir(type(self))
@@ -182,14 +209,20 @@ class BaseConfig(collections.Mapping):
                 ) and hasattr(self, attr)
             )
         )
-        
+
         yield from my_vars
-        
-        
+
     def __new__(cls, *args, **kwargs):
+        """
+        Constructs a new instance. This functions like a factory, and will
+        make a dummy subclass of the class before sending to
+        :py:meth:`__init__`, in order to ensure that properties (attributes)
+        do not bleed across instances of the class.
+        """
+
         if hasattr(cls, '__factory_subclass'):
             return super().__new__(*args, **kwargs)
-            
+
         else:
             new_cls_name = cls.__name__
             new_cls = type(new_cls_name, (cls, ), {
@@ -200,179 +233,242 @@ class BaseConfig(collections.Mapping):
                 ]),
                 '__factory_subclass': True,
                 '__doc__': '\n'.join([
-                    'Facory-generated specialized subclass.',
+                    'Factory-generated specialized subclass.'.format(
+                        name=cls.__name__
+                    ),
                     cls.__doc__ if cls.__doc__ is not None else ''
                 ])
             })
             return super().__new__(new_cls)
-            
+
+    def __init__(self, *, attrs):
+        if not attrs:
+            return
+        data, funcs, attrs = zip(*[
+            (
+                attr['name'],
+                (attr['name'], attr['func'] if 'func' in attr else None),
+                {
+                    key: value
+                    for key, value in attr.items()
+                    if key != 'func'
+                }
+            )
+            for attr in attrs
+        ])
+        self._attr_data = data
+        funcs = dict(item for item in funcs if item is not None)
+        self._attr_func = funcs.keys()
+        list(
+            itertools.starmap(
+                setattr,
+                (
+                    (self.__attr_func, key, value)
+                    for key, value in funcs.items()
+                    if value is not None
+                )
+            )
+        )
+        list(map(lambda a: self._set_attr(**a), attrs))
+        
     @property
     def bad_names(self):
         """
-        The set of attribute names to exclude from the dir() function output.
+        A set containing strings of attributes & methods for the class that
+        should not be included in dir(self).
         """
-        
+
         try:
-            return self.__data['bad_names']
-            
-        except KeyError:
+            return frozenset(self.__bad_names)
+
+        except AttributeError:
             self.bad_names = {
                 'bad_names',
-                '_unregister_attr',
-                '_replace_attr'
+                '_simple_get_',
+                '_loadable_get_',
+                '_setable_get_',
+                '_setable_set_',
+                '_attr_data',
+                '_attr_func',
             } | {
-                ''.join(['__BaseConfig', attr])
+                ''.join(['_BaseConfig', attr])
                 for attr in {
+                    '__bad_names',
                     '__attr_data',
-                    '__attr_set',
-                    '__data',
-                    '__internal_dict'
+                    '__attr_func',
+                    '__gen_valid_keys',
+                    '__gen_unloaded_items',
+                    '__gen_loaded_items',
                 }
             }
-            
-            return self.__data['bad_names']
-    
+
+            return frozenset(self.__bad_names)
+
     @bad_names.setter
     def bad_names(self, new_bad_names):
-        self.__data['bad_names'] = new_bad_names
-        
+        self.__bad_names = tuple(new_bad_names)
+
     def copy(self):
+        "D.copy() -> a shallow copy of D"
+
         return vars(self).copy()
-        
+
     def get(self, key, default=None):
-        return vars(self).get(key, default)
+        "D.get(k[,d]) -> D[k] if k in D, else d.  d defaults to None."
+
+        return getattr(self, key, default)
 
     def deepcopy(self):
-        """
-        Returns a read/write version of the config object.
-        """
-        
+        "D.deepcopy() -> a deep copy of D"
+
         return unpack_element(self)
-        
+
     @property
-    def __data(self):
+    def _attr_data(self):
         try:
             return self.__attr_data
-            
+
         except AttributeError:
-            self.__attr_data = {}
+            self.__attr_data = type(
+                ''.join([type(self).__name__, 'EmptyData']),
+                (),
+                {
+                    '__module__': type(self).__module__,
+                    '__slots__': ()
+                }
+            )()
             return self.__attr_data
-            
+
+    @_attr_data.setter
+    def _attr_data(self, data):
+        self.__attr_data = type(
+            ''.join([type(self).__name__, 'Data']),
+            (),
+            {
+                '__module__': type(self).__module__,
+                '__slots__': tuple(set(data))
+            }
+        )()
+
     @property
-    def __internal_dict(self):
+    def _attr_func(self):
         try:
-            return self.__data['internal_dict']
-            
-        except KeyError:
-            self.__data['internal_dict'] = {}
-            return self.__data['internal_dict']
-            
-    @property
-    def __attr_set(self):
-        try:
-            return self.__data['attr_set']
-            
-        except KeyError:
-            self.__data['attr_set'] = set()
-            return self.__data['attr_set']
-            
-    def _replace_attr(self, name, func, doc=None, setable=False):
-        self._unregister_attr(name)
-        self.register_attr(name, func, doc, setable)
-        
-    def _unregister_attr(self, name):
-        delattr(type(self), name)
-        self.__attr_set.discard(name)
-        
-        try:
-            del self.__internal_dict[name]
-            
-        except KeyError:
-            pass
-        
-    def register_attr(self, name, func, doc=None, setable=False):
-        """
-        Registers a new attribute for the config object that can then be
-        accessed from the object, and lazily-computed when accessed.
-        
-        :param name: The name of the attribute. This should follow the
-            restrictions for variable names, as it can be accessed as an
-            attribute on the config object.
-        :type name: str
-        :param func: A function that returns the value for this attribute. This
-            function must need no additional parameters, unless the setable
-            parameter is True, then it must accept a single parameter.
-        :type func: callable
-        :param doc: The docstring for the attribute. If not included, a generic
-            docstring will be set.
-        :type doc: str
-        :param setable: If True, the attribute is not accessable until it has
-            been set, and it can only ever be set a single time. If accessed
-            before being set, or if a process attempts to set the attribute a
-            second time, this raises a :py:class:`AttributeError`
-        :type setable: bool
-        """
-        
+            return self.__attr_func
+
+        except AttributeError:
+            self.__attr_func = type(
+                ''.join([type(self).__name__, 'EmptyFuncs']),
+                (),
+                {
+                    '__module__': type(self).__module__,
+                    '__slots__': ()
+                }
+            )()
+            return self.__attr_func
+
+    @_attr_func.setter
+    def _attr_func(self, data):
+        self.__attr_func = type(
+            ''.join([type(self).__name__, 'Funcs']),
+            (),
+            {
+                '__module__': type(self).__module__,
+                '__slots__': tuple(set(data))
+            }
+        )()
+
+    @staticmethod
+    def _simple_get_(name, self):
+        return getattr(self._attr_data, name)
+
+    @staticmethod
+    def _loadable_get_(name, self):
+        func = getattr(self._attr_func, name)
+        ret = func()
+        setattr(self._attr_data, name, ret)
+        setattr(
+            type(self),
+            name,
+            property(
+                functools.partial(self._simple_get_, name)
+            )
+        )
+        delattr(self._attr_func, name)
+        return ret
+
+    @staticmethod
+    def _setable_get_(name, self):
+        raise AttributeError(
+            "'{typename}' object has no attribute '{name}'".format(
+                typename=type(self).__name__,
+                name=name
+            )
+        )
+
+    @staticmethod
+    def _setable_set_(name, self, func):
+        setattr(self._attr_func, name, func)
+        setattr(
+            type(self),
+            name,
+            property(
+                functools.partial(self._loadable_get_, name)
+            )
+        )
+        if hasattr(self._attr_data, name):
+            delattr(self._attr_data, name)
+
+    def _set_attr(self, name, doc=None):
         if doc is None:
-            doc = ' '.join(['The', name, 'attribute.'])
-            
-        if setable:
-            def get_(self):
-                try:
-                    return self.__internal_dict[name]
-                    
-                except KeyError:
-                    raise AttributeError(
-                        ' '.join([name, 'attribute does not exist'])
-                    )
-                    
-            def set_(self, value):
-                if name in self.__internal_dict:
-                    raise AttributeError(
-                        ' '.join(["can't change", name, 'attribute'])
-                    )
-                    
-                self.__internal_dict[name] = func(value)
-            
-            attr_func = property(get_, set_, doc=doc)
-        
+            doc = 'The {name} attribute.'.format(name=name)
+
+        if not hasattr(self._attr_func, name):
+            attr_func = property(
+                functools.partial(self._setable_get_, name),
+                functools.partial(self._setable_set_, name),
+                doc=doc
+            )
+
         else:
-            def get_(self):
-                try:
-                    return self.__internal_dict[name]
-                    
-                except KeyError:
-                    self.__internal_dict[name] = func()
-                    return self.__internal_dict[name]
-                    
-            attr_func = property(get_, doc=doc)
-                
+            attr_func = property(
+                functools.partial(self._loadable_get_, name),
+                doc=doc
+            )
+
         setattr(type(self), name, attr_func)
-        self.__attr_set.add(name)
-        
+
+    def _reset_attr(self, name, func=None, doc=None):
+        if hasattr(self._attr_data, name):
+            delattr(self._attr_data, name)
+
+        if func is not None:
+            setattr(self._attr_func, name, func)
+
+        elif hasattr(self._attr_func, name):
+            delattr(self._attr_func, name)
+
+        self._set_attr(name, doc)
+
     def get_path(self, *path):
-        """
-        Convenience method to directly access a value at any level within the
-        tree.
-        """
-        
         ret = self
         for key in path:
             ret = ret[key]
-            
+
         return ret
-        
+
+
 class DictConfig(BaseConfig):
-    """
-    Very simple config object that converts a dict into a config.
-    """
-    
     def __init__(self, source):
-        for name, value in source.items():
-            self.register_attr(
-                name,
-                functools.partial(parse_epement, value)
-            )
+        super().__init__(
+            attrs=[
+                {
+                    'name': key,
+                    'func': functools.partial(parse_element, value),
+                }
+                for key, value in source.items()
+            ]
+        )
+
             
 class MainConfig(BaseConfig):
     """
@@ -381,20 +477,24 @@ class MainConfig(BaseConfig):
     """
     
     def __init__(self):
-        super().__init__()
-        
-        self.register_attr('Base', lambda: BaseConfig, BaseConfig.__doc__)
-        
-        self.register_attr('Dict', lambda: DictConfig, DictConfig.__doc__)
-        
-        self.register_attr(
-            'to_config',
-            lambda: parse_element,
-            parse_element.__doc__
-        )
-        
-        self.register_attr(
-            'from_config',
-            lambda: unpack_element,
-            unpack_element.__doc__
+        super().__init__(
+            attrs=[
+                {
+                    'name': 'Base',
+                    'func': lambda: BaseConfig,
+                    'doc': BaseConfig.__doc__
+                },
+                
+                {
+                    'name': 'to_config',
+                    'func': lambda: parse_element,
+                    'doc': parse_element.__doc__
+                },
+                
+                {
+                    'name': 'from_config',
+                    'func': lambda: unpack_element,
+                    'doc': unpack_element.__doc__
+                },
+            ]
         )
