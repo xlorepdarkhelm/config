@@ -1,6 +1,9 @@
+import abc
 import builtins
 import collections.abc
+import copy
 import functools
+import gzip
 import itertools
 import sys
 
@@ -60,36 +63,45 @@ def parse_element(elem):
         
     return ret
 
-def unpack_element(elem):
-    isinstance = builtins.isinstance
+def unpack_element(elem, *, memo={}):
+    try:
+        return memo[id(self)]
+        
+    except KeyError:
+        isinstance = builtins.isinstance
+        
+        if isinstance(elem, type):
+            ret = elem
+            
     
-    if isinstance(elem, type):
-        ret = elem
-        
+        elif isinstance(elem, collections.abc.Mapping):
+            ret = {
+                key: unpack_element(value, memo=memo)
+                for key, value in elem.items()
+            }
+            
+        elif isinstance(elem, collections.abc.Set):
+            ret = {unpack_element(value, memo=memo) for value in elem}
+            
+        elif not isinstance(elem, (str, bytes, bytearray)) and all(
+            isinstance(elem, type_)
+            for type_ in {
+                collections.abc.Sized,
+                collections.abc.Iterable,
+                collections.abc.Container,
+                collections.abc.Sequence
+            }
+        ):
+            ret = [unpack_element(value, memo=memo) for value in elem]
+            
+        else:
+            ret = elem
+            
+        memo[id(self)] = ret
+            
+        return memo[id(self)]
 
-    elif isinstance(elem, collections.abc.Mapping):
-        ret = {key: unpack_element(value) for key, value in elem.items()}
-        
-    elif isinstance(elem, collections.abc.Set):
-        ret = {unpack_element(value) for value in elem}
-        
-    elif not isinstance(elem, (str, bytes, bytearray)) and all(
-        isinstance(elem, type_)
-        for type_ in {
-            collections.abc.Sized,
-            collections.abc.Iterable,
-            collections.abc.Container,
-            collections.abc.Sequence
-        }
-    ):
-        ret = [unpack_element(value) for value in elem]
-        
-    else:
-        ret = elem
-        
-    return ret
-
-class BaseConfig(collections.Mapping):
+class BaseConfig(collections.Mapping, metaclass=abc.ABCMeta):
     def __gen_valid_keys(self):
         yield from (
             key
@@ -311,17 +323,25 @@ class BaseConfig(collections.Mapping):
     def copy(self):
         "D.copy() -> a shallow copy of D"
 
-        return vars(self).copy()
+        return copy.copy(self)
+        
+    def __copy__(self):
+        return copy.copy(vars(self))
 
     def get(self, key, default=None):
         "D.get(k[,d]) -> D[k] if k in D, else d.  d defaults to None."
 
         return getattr(self, key, default)
 
-    def deepcopy(self):
-        "D.deepcopy() -> a deep copy of D"
+    def __deepcopy__(self, memo):
 
-        return unpack_element(self)
+        try:
+            return memo[id(self)]
+            
+        except KeyError:
+            memo[id(self)] = unpack_element(self, memo=memo)
+            return memo[id(self)]
+
 
     @property
     def _attr_data(self):
@@ -455,6 +475,32 @@ class BaseConfig(collections.Mapping):
             ret = ret[key]
 
         return ret
+        
+    def __getstate__(self):
+        ret = {
+            key: value
+            for key, value in self.__gen_unloaded_items()
+            if value is not NotLoaded
+        }
+        
+    def __setstate__(self):
+        for key, value in state.items():
+            setattr(self._attr_Data, key, value)
+            setattr(
+                type(self),
+                key,
+                property(functools,partial(self._simple_get_, key))
+            )
+            
+            try:
+                delattr(self._attr_func, key)
+                
+            except AttributeError:
+                pass
+            
+    @abc.abstractmethod
+    def __reduce__(self):
+        pass
 
 
 class DictConfig(BaseConfig):
@@ -468,6 +514,9 @@ class DictConfig(BaseConfig):
                 for key, value in source.items()
             ]
         )
+        
+    def __reduce__(self):
+        return (DictConfig, (self.deepcopy(), ), self.__getstate__())
 
             
 class MainConfig(BaseConfig):
@@ -498,3 +547,6 @@ class MainConfig(BaseConfig):
                 },
             ]
         )
+        
+    def __reduce__(self):
+        return (MainConfig, (), self.__getstate__())
